@@ -13,12 +13,27 @@ const CONFIG: DexConfig = {
         WCSPR: {
             packageHash: ENV.WCSPR_PACKAGE_HASH || ENV.VITE_WCSPR_PACKAGE_HASH || '',
             contractHash: ENV.WCSPR_CONTRACT_HASH || ENV.VITE_WCSPR_CONTRACT_HASH || '',
-            decimals: 9,
+            decimals: 18,
         },
         ECTO: {
             packageHash: ENV.ECTO_PACKAGE_HASH || ENV.VITE_ECTO_PACKAGE_HASH || '',
             contractHash: ENV.ECTO_CONTRACT_HASH || ENV.VITE_ECTO_CONTRACT_HASH || '',
             decimals: 18,
+        },
+        USDC: {
+            packageHash: ENV.USDC_PACKAGE_HASH || ENV.VITE_USDC_PACKAGE_HASH || '',
+            contractHash: ENV.USDC_CONTRACT_HASH || ENV.VITE_USDC_CONTRACT_HASH || '',
+            decimals: 6,
+        },
+        WETH: {
+            packageHash: ENV.WETH_PACKAGE_HASH || ENV.VITE_WETH_PACKAGE_HASH || '',
+            contractHash: ENV.WETH_CONTRACT_HASH || ENV.VITE_WETH_CONTRACT_HASH || '',
+            decimals: 18,
+        },
+        WBTC: {
+            packageHash: ENV.WBTC_PACKAGE_HASH || ENV.VITE_WBTC_PACKAGE_HASH || '',
+            contractHash: ENV.WBTC_CONTRACT_HASH || ENV.VITE_WBTC_CONTRACT_HASH || '',
+            decimals: 8,
         },
     },
     pairs: {

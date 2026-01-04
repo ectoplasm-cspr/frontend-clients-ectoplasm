@@ -43,8 +43,10 @@ export const Liquidity: React.FC<Props> = ({ wallet, log }) => {
         if (!wallet.publicKey) return;
         setLoading(true);
         try {
-            const amtABI = BigInt(parseFloat(amountA) * 1e9);
-            const amtBBI = BigInt(parseFloat(amountB) * 1e18);
+            const decA = config.tokens.WCSPR.decimals;
+            const decB = config.tokens.ECTO.decimals;
+            const amtABI = BigInt(Math.floor(parseFloat(amountA) * (10 ** decA)));
+            const amtBBI = BigInt(Math.floor(parseFloat(amountB) * (10 ** decB)));
 
             log(`Adding Liquidity: ${amountA} WCSPR + ${amountB} ECTO`);
             const deploy = dex.makeAddLiquidityDeploy(
@@ -70,7 +72,8 @@ export const Liquidity: React.FC<Props> = ({ wallet, log }) => {
          if (!wallet.publicKey) return;
         setLoading(true);
         try {
-            const liqBI = BigInt(parseFloat(removeAmount) * 1e9);
+            // LP Token is always 18 decimals
+            const liqBI = BigInt(Math.floor(parseFloat(removeAmount) * 1e18));
 
             log(`Removing Liquidity: ${removeAmount} LP Tokens`);
             const deploy = dex.makeRemoveLiquidityDeploy(

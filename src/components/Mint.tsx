@@ -12,7 +12,7 @@ interface Props {
 
 export const Mint: React.FC<Props> = ({ wallet, log }) => {
     const { dex, config } = useDex();
-    const [token, setToken] = useState<'WCSPR' | 'ECTO'>('WCSPR');
+    const [token, setToken] = useState<string>('WCSPR');
     const [amount, setAmount] = useState('1000');
     const [loading, setLoading] = useState(false);
 
@@ -72,6 +72,9 @@ export const Mint: React.FC<Props> = ({ wallet, log }) => {
                 <select value={token} onChange={(e) => setToken(e.target.value as any)}>
                     <option value="WCSPR">WCSPR</option>
                     <option value="ECTO">ECTO</option>
+                    <option value="USDC">USDC</option>
+                    <option value="WETH">WETH</option>
+                    <option value="WBTC">WBTC</option>
                 </select>
             </div>
             <div className="form-group">

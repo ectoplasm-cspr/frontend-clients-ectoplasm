@@ -23,11 +23,11 @@ export default defineConfig({
   server: {
     proxy: {
       '/rpc': {
-        target: 'http://127.0.0.1:11101',
+        target: 'http://65.21.235.122:7777',
         changeOrigin: true,
         secure: false,
-      }
-    }
+      },
+    },
   },
   build: {
     target: 'esnext' // Important for BigInt support
