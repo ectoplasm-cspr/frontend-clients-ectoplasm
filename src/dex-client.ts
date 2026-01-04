@@ -243,6 +243,49 @@ export class DexClient {
         }
     }
 
+    /**
+     * Get all existing pairs from Factory
+     * Returns array of pair addresses
+     */
+    async getAllPairs(): Promise<string[]> {
+        const stateRoot = await this.normalizeStateRootHash(
+            (await this.rpcClient.getStateRootHashLatest()).stateRootHash
+        );
+
+        const factoryHash = this.config.factoryHash;
+
+        try {
+            // all_pairs_length is at index 6 (Var<Option<Address>> takes 2 indices)
+            const lengthKey = this.generateOdraVarKey(6);
+            const length = await this.queryStateValue(stateRoot, factoryHash, lengthKey);
+
+            if (!length || typeof length !== 'bigint' || length === 0n) {
+                return []; // No pairs exist
+            }
+
+            const pairCount = Number(length);
+            const pairs: string[] = [];
+
+            // all_pairs mapping is at index 5
+            for (let i = 0; i < pairCount; i++) {
+                const indexBytes = new Uint8Array(4);
+                new DataView(indexBytes.buffer).setUint32(0, i, true); // Little Endian for u32
+
+                const pairKey = this.generateOdraMappingKey(5, indexBytes);
+                const pairAddr = await this.queryStateValue(stateRoot, factoryHash, pairKey);
+
+                if (pairAddr && typeof pairAddr === 'string') {
+                    pairs.push(pairAddr);
+                }
+            }
+
+            return pairs;
+        } catch (e) {
+            console.error('Error fetching all pairs:', e);
+            return [];
+        }
+    }
+
     // Helper: Compare two byte arrays
     private compareBytes(a: Uint8Array, b: Uint8Array): number {
         const len = Math.min(a.length, b.length);
