@@ -63,11 +63,18 @@ export interface DexConfig {
 export class DexClient {
     private rpcClient: any;
     private config: DexConfig;
+    private pairAddressCache = new Map<string, string>();
 
     private normalizeContractKey(key: string): string {
         const k = (key || '').trim().replace(/^0x/i, '');
         if (k.startsWith('hash-') || k.startsWith('entity-contract-') || k.startsWith('contract-')) return k;
         return `hash-${k}`;
+    }
+
+    private pairCacheKey(tokenA: string, tokenB: string): string {
+        const a = (tokenA || '').toLowerCase();
+        const b = (tokenB || '').toLowerCase();
+        return a < b ? `${a}|${b}` : `${b}|${a}`;
     }
 
     private normalizeStateRootHash(value: any): string {
@@ -100,49 +107,9 @@ export class DexClient {
      * Get the current reserves for a pair
      */
     async getPairReserves(pairHash: string): Promise<{ reserve0: bigint; reserve1: bigint }> {
-        try {
-            const stateRootWrapper = await this.rpcClient.getStateRootHashLatest();
-            const stateRootHash = this.normalizeStateRootHash(stateRootWrapper.stateRootHash);
-
-            let contractHash = pairHash;
-            if (pairHash.startsWith('hash-')) {
-                try {
-                    const packageData: any = await this.rpcRequest('state_get_item', {
-                        state_root_hash: stateRootHash,
-                        key: pairHash,
-                        path: []
-                    });
-
-                    const versions = packageData.stored_value?.ContractPackage?.versions;
-                    if (versions && versions.length > 0) {
-                        const latestVersion = versions[versions.length - 1];
-                        contractHash = latestVersion.contract_hash;
-
-                        if (contractHash.startsWith('contract-')) {
-                            contractHash = contractHash.replace('contract-', 'hash-');
-                        }
-                    }
-                } catch (e) {
-                    console.warn(`DEBUG: Could not resolve package hash, trying as-is`, e);
-                }
-            }
-
-            // Layout observed earlier:
-            // 3: token0, 4: reserve1, 5: reserve0, 6: token1
-            const reserve0Key = this.generateOdraVarKey(5);
-            const reserve1Key = this.generateOdraVarKey(4);
-
-            const reserve0Val = await this.queryStateValue(stateRootHash, contractHash, reserve0Key);
-            const reserve1Val = await this.queryStateValue(stateRootHash, contractHash, reserve1Key);
-
-            return {
-                reserve0: reserve0Val || 0n,
-                reserve1: reserve1Val || 0n
-            };
-        } catch (e) {
-            console.error(`Error fetching reserves for ${pairHash}:`, e);
-            return { reserve0: 0n, reserve1: 0n };
-        }
+        const state = await this.getPairState(pairHash);
+        if (!state) return { reserve0: 0n, reserve1: 0n };
+        return { reserve0: state.reserve0, reserve1: state.reserve1 };
     }
 
     /**
@@ -165,71 +132,23 @@ export class DexClient {
             const resolved = await this.resolveContractHash(stateRootHash, pairHash);
             const contractHash = resolved?.contractHash ?? pairHash;
 
-            const indices = [3, 4, 5, 6];
-            const entries: { index: number; value: any }[] = [];
-            for (const index of indices) {
-                const key = this.generateOdraVarKey(index);
-                const val = await this.queryStateValue(stateRootHash, contractHash, key);
-                entries.push({ index, value: val });
+            // Odra 2.5.0 layout for Pair:
+            // 0-1: lp_token submodule
+            // 2: token0, 3: token1, 4: reserve0, 5: reserve1, 6: block_timestamp_last
+            const token0Key = this.generateOdraVarKey(2);
+            const token1Key = this.generateOdraVarKey(3);
+            const reserve0Key = this.generateOdraVarKey(4);
+            const reserve1Key = this.generateOdraVarKey(5);
+
+            const token0Val = await this.queryStateValue(stateRootHash, contractHash, token0Key);
+            const token1Val = await this.queryStateValue(stateRootHash, contractHash, token1Key);
+            const reserve0Val = await this.queryStateValue(stateRootHash, contractHash, reserve0Key);
+            const reserve1Val = await this.queryStateValue(stateRootHash, contractHash, reserve1Key);
+
+            if (typeof token0Val === 'string' && typeof token1Val === 'string' && typeof reserve0Val === 'bigint' && typeof reserve1Val === 'bigint') {
+                return { token0: token0Val, token1: token1Val, reserve0: reserve0Val, reserve1: reserve1Val };
             }
-
-            const getVal = (idx: number) => entries.find((e) => e.index === idx)?.value;
-            const v3 = getVal(3);
-            const v4 = getVal(4);
-            const v5 = getVal(5);
-            const v6 = getVal(6);
-
-            // Layout A (documented): token0=3, token1=4, reserve0=5, reserve1=6
-            if (typeof v3 === 'string' && typeof v4 === 'string' && typeof v5 === 'bigint' && typeof v6 === 'bigint') {
-                return { token0: v3, token1: v4, reserve0: v5, reserve1: v6 };
-            }
-
-            // Layout B (observed earlier): token0=3, reserve1=4, reserve0=5, token1=6
-            if (typeof v3 === 'string' && typeof v6 === 'string' && typeof v4 === 'bigint' && typeof v5 === 'bigint') {
-                return { token0: v3, token1: v6, reserve0: v5, reserve1: v4 };
-            }
-
-            const addressEntries = entries.filter((e) => typeof e.value === 'string');
-            const reserveEntries = entries.filter((e) => typeof e.value === 'bigint');
-
-            if (addressEntries.length < 2 || reserveEntries.length < 2) {
-                // Fallback: scan a wider index range to infer layout
-                const scanEntries: { index: number; value: any }[] = [];
-                for (let index = 0; index <= 24; index++) {
-                    const key = this.generateOdraVarKey(index);
-                    const val = await this.queryStateValue(stateRootHash, contractHash, key);
-                    scanEntries.push({ index, value: val });
-                }
-
-                const addrList = scanEntries.filter((e) => typeof e.value === 'string').sort((a, b) => a.index - b.index);
-                const numList = scanEntries.filter((e) => typeof e.value === 'bigint').sort((a, b) => a.index - b.index);
-
-                if (addrList.length >= 2) {
-                    const token0 = addrList[0].value as string;
-                    const token1 = addrList[1].value as string;
-                    const minReserveIndex = addrList[1].index + 1;
-                    const reserves = numList.filter((e) => e.index >= minReserveIndex);
-                    if (reserves.length >= 2) {
-                        return {
-                            token0,
-                            token1,
-                            reserve0: reserves[0].value as bigint,
-                            reserve1: reserves[1].value as bigint
-                        };
-                    }
-                }
-                return null;
-            }
-
-            addressEntries.sort((a, b) => a.index - b.index);
-            reserveEntries.sort((a, b) => a.index - b.index);
-
-            return {
-                token0: addressEntries[0].value as string,
-                token1: addressEntries[1].value as string,
-                reserve0: reserveEntries[0].value as bigint,
-                reserve1: reserveEntries[1].value as bigint
-            };
+            return null;
         } catch (e) {
             console.error(`Error fetching pair state for ${pairHash}:`, e);
             return null;
@@ -341,7 +260,14 @@ export class DexClient {
      * Get the pair address for two tokens
      */
     async getPairAddress(tokenA: string, tokenB: string): Promise<string | null> {
+        const cacheKey = this.pairCacheKey(tokenA, tokenB);
+        const cached = this.pairAddressCache.get(cacheKey);
+        if (cached) return cached;
+
         const result = await this.getPairAddressDebug(tokenA, tokenB);
+        if (result.pairAddr) {
+            this.pairAddressCache.set(cacheKey, result.pairAddr);
+        }
         return result.pairAddr;
     }
 

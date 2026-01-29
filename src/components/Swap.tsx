@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import sdk from 'casper-js-sdk';
 import { useDex } from '../contexts/DexContext';
 import { useWallet } from '../hooks/useWallet';
@@ -23,7 +23,10 @@ export const Swap: React.FC<Props> = ({ wallet, log, onSuccess }) => {
     
     const [amountIn, setAmountIn] = useState('10');
     const [loading, setLoading] = useState(false);
+    const [loadingPool, setLoadingPool] = useState(false);
     const [pairInfo, setPairInfo] = useState<{r0: bigint, r1: bigint, token0: string, token1: string} | null>(null);
+    const pairRequestRef = useRef(0);
+    const pairInfoCache = useRef<Map<string, {r0: bigint, r1: bigint, token0: string, token1: string}>>(new Map());
     const [slippage, setSlippage] = useState('0.5'); // 0.5% default slippage
     
     // Swap preview state
@@ -45,60 +48,107 @@ export const Swap: React.FC<Props> = ({ wallet, log, onSuccess }) => {
         }
     }, [tokenIn, tokenOut, tokenSymbols]);
 
-    const serializeKey = (keyStr: string): Uint8Array => {
-        let tag = 1;
-        let clean = keyStr;
-        if (keyStr.startsWith('account-hash-')) {
-            tag = 0;
-            clean = keyStr.replace('account-hash-', '');
-        } else if (keyStr.startsWith('hash-')) {
-            clean = keyStr.replace('hash-', '');
-        } else if (keyStr.startsWith('contract-package-')) {
-            clean = keyStr.replace('contract-package-', '');
-        }
-        const bytes = new Uint8Array(33);
-        bytes[0] = tag;
-        const hashBytes = new Uint8Array(clean.match(/.{1,2}/g)!.map(b => parseInt(b, 16)));
-        bytes.set(hashBytes, 1);
-        return bytes;
-    };
-
-    const compareBytes = (a: Uint8Array, b: Uint8Array): number => {
-        const len = Math.min(a.length, b.length);
-        for (let i = 0; i < len; i++) {
-            if (a[i] !== b[i]) return a[i] - b[i];
-        }
-        return a.length - b.length;
+    const normalizeHash = (keyStr: string) => {
+        if (!keyStr) return '';
+        return keyStr
+            .toLowerCase()
+            .replace(/^hash-/, '')
+            .replace(/^contract-/, '')
+            .replace(/^contract-package-/, '');
     };
 
     useEffect(() => {
+        let cancelled = false;
+
         const fetchReserves = async () => {
+            const reqId = ++pairRequestRef.current;
             const tokenInCfg = config.tokens[tokenIn];
             const tokenOutCfg = config.tokens[tokenOut];
             if (!tokenInCfg?.packageHash || !tokenOutCfg?.packageHash || tokenIn === tokenOut) {
                 setPairInfo(null);
+                setLoadingPool(false);
                 return;
             }
 
-            const pairAddr = await dex.getPairAddress(
-                tokenInCfg.packageHash,
-                tokenOutCfg.packageHash
-            );
-
-            if (!pairAddr) {
+            const cacheKey = `${tokenIn}|${tokenOut}`;
+            const cached = pairInfoCache.current.get(cacheKey);
+            if (cached) {
+                setPairInfo(cached);
+                log(`Pool cache hit for ${tokenIn}/${tokenOut}`);
+            } else {
                 setPairInfo(null);
-                return;
             }
 
-            const res = await dex.getPairReserves(pairAddr);
-            const keyA = serializeKey(tokenInCfg.packageHash);
-            const keyB = serializeKey(tokenOutCfg.packageHash);
-            const token0 = compareBytes(keyA, keyB) <= 0 ? tokenIn : tokenOut;
-            const token1 = token0 === tokenIn ? tokenOut : tokenIn;
+            setLoadingPool(true);
+            log(`Fetching pool for ${tokenIn}/${tokenOut}...`);
 
-            setPairInfo({ r0: res.reserve0, r1: res.reserve1, token0, token1 });
+            const withTimeout = <T,>(p: Promise<T>, ms: number) =>
+                Promise.race([
+                    p,
+                    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+                ]);
+
+            try {
+                const pairAddr = await withTimeout(
+                    dex.getPairAddress(
+                        tokenInCfg.packageHash,
+                        tokenOutCfg.packageHash
+                    ),
+                    12000
+                );
+
+                if (cancelled || reqId !== pairRequestRef.current) return;
+
+                if (!pairAddr) {
+                    setPairInfo(null);
+                    log(`No pair address found for ${tokenIn}/${tokenOut}`);
+                    return;
+                }
+
+                log(`Pair address for ${tokenIn}/${tokenOut}: ${pairAddr}`);
+
+                const state = await withTimeout(dex.getPairState(pairAddr), 12000);
+                if (cancelled || reqId !== pairRequestRef.current) return;
+
+                if (!state) {
+                    setPairInfo(null);
+                    log(`Pair state missing for ${tokenIn}/${tokenOut}`);
+                    return;
+                }
+
+                const findSymbol = (addr: string) => {
+                    const normalized = normalizeHash(addr);
+                    return Object.entries(config.tokens).find(([, t]) => {
+                        const pkg = normalizeHash(t.packageHash);
+                        const ctr = normalizeHash(t.contractHash);
+                        return normalized === pkg || normalized === ctr;
+                    })?.[0];
+                };
+
+                const token0 = findSymbol(state.token0) ?? tokenIn;
+                const token1 = findSymbol(state.token1) ?? tokenOut;
+
+                const info = { r0: state.reserve0, r1: state.reserve1, token0, token1 };
+                pairInfoCache.current.set(cacheKey, info);
+                setPairInfo(info);
+                log(`Pool loaded for ${tokenIn}/${tokenOut}`);
+            } catch (e) {
+                log(`Pool fetch failed for ${tokenIn}/${tokenOut}: ${(e as Error).message}`);
+                // Keep cached info if available to avoid oscillation
+            } finally {
+                if (!cancelled && reqId === pairRequestRef.current) {
+                    setLoadingPool(false);
+                }
+            }
         };
+
         fetchReserves();
+        const interval = setInterval(fetchReserves, 15000);
+
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
     }, [dex, config, tokenIn, tokenOut]);
 
     // Calculate swap preview whenever input, reserves, or token selection changes
@@ -243,7 +293,12 @@ export const Swap: React.FC<Props> = ({ wallet, log, onSuccess }) => {
                     Pool: {(Number(pairInfo.r0) / 10**config.tokens[pairInfo.token0].decimals).toFixed(2)} {pairInfo.token0} / {(Number(pairInfo.r1) / 10**config.tokens[pairInfo.token1].decimals).toFixed(2)} {pairInfo.token1}
                 </div>
             )}
-            {!pairInfo && tokenIn !== tokenOut && (
+            {loadingPool && tokenIn !== tokenOut && (
+                <div style={{fontSize: '0.8rem', marginBottom: '1rem', color: '#aaa'}}>
+                    Loading pool for {tokenIn} / {tokenOut}...
+                </div>
+            )}
+            {!loadingPool && !pairInfo && tokenIn !== tokenOut && (
                 <div style={{fontSize: '0.8rem', marginBottom: '1rem', color: '#aaa'}}>
                     No pool found for {tokenIn} / {tokenOut}
                 </div>
