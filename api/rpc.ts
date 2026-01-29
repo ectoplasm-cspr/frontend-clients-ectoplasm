@@ -20,7 +20,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             res.status(400).json({ error: 'Missing request body' });
             return;
         }
-        payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        if (Buffer.isBuffer(req.body)) {
+            payload = JSON.parse(req.body.toString('utf8'));
+        } else if (typeof req.body === 'string') {
+            payload = JSON.parse(req.body);
+        } else {
+            payload = req.body;
+        }
     } catch (e: any) {
         res.status(400).json({ error: 'Invalid JSON body', detail: e?.message });
         return;
@@ -38,6 +44,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         res.setHeader('content-type', upstream.headers.get('content-type') || 'application/json');
         res.send(text);
     } catch (e: any) {
-        res.status(502).json({ error: 'Upstream RPC failed', detail: e?.message });
+        res.status(502).json({ error: 'Upstream RPC failed', detail: e?.message, rpcUrl });
     }
 }
